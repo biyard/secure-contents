@@ -1,0 +1,13 @@
+[package]
+name = "lf-watermark"
+version = "0.1.0"
+edition = "2021"
+description = "Library for applying low frequency watermark to an image."
+repository = "https://github.com/biyard/secure-contents"
+resolver = "2"
+keywords = ["watermark", "low frequency", "contents", "security" ]
+
+[dependencies]
+image = "0.25.5"
+imageproc = "0.25.0"
+rustdct = "0.7.1"
