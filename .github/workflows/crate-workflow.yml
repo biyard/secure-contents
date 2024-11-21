@@ -24,6 +24,8 @@ jobs:
           target: wasm32-unknown-unknown
           toolchain: stable
 
+      - name: test
+        run: cargo test
 
       - name: Publish
         env:
