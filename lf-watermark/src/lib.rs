@@ -1,89 +1,94 @@
 use std::error::Error;
 
-use image::{DynamicImage, GenericImage, GenericImageView, Pixel};
+use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
 use rustdct::DctPlanner;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-pub fn words_to_bytes(words: &str) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let char_map = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+pub fn get_watermark_from_str(words: &str) -> Result<f32> {
+    let char_map =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*(),.<>/?; ";
+
+    let mut ret = 0.0;
 
     for i in 0..words.len() {
         let c = words.chars().nth(i).ok_or("invalid index")?;
-        let char_idx = char_map.find(c).ok_or("Invalid character")?;
-        bytes.push(char_idx as u8);
+        let char_idx = char_map
+            .find(c)
+            .ok_or(format!("Invalid character; {}", c))?;
+        ret += char_idx as f32;
     }
 
-    Ok(bytes)
+    Ok(ret
+        * option_env!("WATERMARK_STRENGTH")
+            .unwrap_or("0.01")
+            .parse::<f32>()?)
 }
 
-pub fn embed_watermark_color(image: &DynamicImage, watermark: &str) -> Result<DynamicImage> {
-    // let img = image::open("image.png").unwrap().to_rgb8();
-
-    // // Create the ImageDct object from ImageBuffer
-    // let mut image_dct = ImageDct::new(img);
-
-    // // Compute the DCT of the image then compute the inverse DCT on the coefficients
-    // image_dct.compute_dct();
-    // image_dct.compute_idct();
-
-    // // Reconstruct it back into an RGB ImageBuffer
-    // let reconstructed_image = image_dct.reconstructe_image();
-
-    // // Save the reconstructed image into a PNG
-    // image::save_buffer(
-    //     "./output.png",
-    //     &reconstructed_image,
-    //     image_dct.width() as u32,
-    //     image_dct.height(),
-    //     image::ColorType::Rgb8,
-    // )
-    //     .unwrap();
-
-    // Split image into R, G, B channels
-    let watermark_bytes = words_to_bytes(watermark)?;
+pub fn embed_watermark_color(image: &DynamicImage, watermark: &str) -> Result<RgbImage> {
+    let watermark = get_watermark_from_str(watermark)?;
 
     let (width, height) = image.dimensions();
     let len = (width * height) as usize;
-    let mut r_channel = vec![0.0; len];
-    let mut g_channel = vec![0.0; len];
-    let mut b_channel = vec![0.0; len];
-    let mut a_channel = vec![0.0; len];
+    let mut cbcr_channel = vec![(0, 0); len];
+    let mut y_channel = vec![0.0; len];
+    let idx_fn = |x: u32, y: u32| (y * width + x) as usize;
+    let normalization_factor = (2.0 / len as f32).sqrt();
 
-    for (x, y, pixel) in image.pixels() {
-        let rgba = pixel.to_rgba();
-        let idx = (y * width + x) as usize;
-        let r = rgba[0];
-        let g = rgba[1];
-        let b = rgba[2];
-        let a = rgba[3];
-        r_channel[idx] = r as f64;
-        g_channel[idx] = g as f64;
-        b_channel[idx] = b as f64;
-        a_channel[idx] = a as f64;
+    let image = image.to_rgb8();
+
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let idx = idx_fn(x, y);
+
+        let (y, u, v) = rgb_to_ycbcr(&pixel);
+        cbcr_channel[idx] = (u, v);
+        y_channel[idx] = y as f32 + watermark;
     }
 
-    let mut dct_planner = DctPlanner::new();
+    let mut dct_planner: DctPlanner<f32> = DctPlanner::new();
     let dct = dct_planner.plan_dct2(len);
-    dct.process_dct2(&mut g_channel);
+    dct.process_dct2(&mut y_channel);
 
-    let alpha = 10.0;
-    g_channel[0] += alpha * (watermark_bytes[0] as f64);
-
-    dct.process_dct3(&mut g_channel);
-
-    let mut output_image = DynamicImage::new_rgb8(width, height);
-    for (x, y, _) in image.pixels() {
-        let idx = (y * width + x) as usize;
-        let r = r_channel[idx].clamp(0.0, 255.0) as u8;
-        let g = g_channel[idx].clamp(0.0, 255.0) as u8;
-        let b = b_channel[idx].clamp(0.0, 255.0) as u8;
-        let a = a_channel[idx].clamp(0.0, 255.0) as u8;
-        output_image.put_pixel(x, y, image::Rgba([r, g, b, a]));
+    for y in y_channel.iter_mut() {
+        *y *= normalization_factor;
     }
 
-    Ok(output_image)
+    let idct = dct_planner.plan_dct3(len);
+    idct.process_dct3(&mut y_channel);
+    for y in y_channel.iter_mut() {
+        *y *= normalization_factor;
+    }
+
+    let mut img_buffer = RgbImage::new(width, height);
+    for (x, y, pixel) in img_buffer.enumerate_pixels_mut() {
+        let index = idx_fn(x, y);
+        let y_ch = y_channel[index];
+        let (cb, cr) = cbcr_channel[index];
+
+        *pixel = ycbcr_to_rgb(y_ch, cb as f32, cr as f32);
+    }
+
+    Ok(img_buffer)
+}
+
+fn rgb_to_ycbcr(pixel: &Rgb<u8>) -> (u8, u8, u8) {
+    let r = pixel[0] as f64;
+    let g = pixel[1] as f64;
+    let b = pixel[2] as f64;
+
+    let y = (0.299 * r + 0.587 * g + 0.114 * b).round() as u8;
+    let cb = (-0.169 * r - 0.331 * g + 0.5 * b + 128.0).round() as u8;
+    let cr = (0.5 * r - 0.419 * g - 0.081 * b + 128.0).round() as u8;
+
+    (y, cb, cr)
+}
+
+fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32) -> Rgb<u8> {
+    let r = (y + 1.402 * (cr as f32 - 128.0)).round() as u8;
+    let g = (y - 0.34414 * (cb as f32 - 128.0) - 0.71414 * (cr as f32 - 128.0)).round() as u8;
+    let b = (y + 1.772 * (cb as f32 - 128.0)).round() as u8;
+
+    Rgb([r, g, b])
 }
 
 #[cfg(test)]
@@ -91,10 +96,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_get_watermark_from_str() {
+        let words = "Hello, World!";
+        let bytes = get_watermark_from_str(words).unwrap();
+        assert_eq!(bytes, 5.35);
+    }
+
+    #[test]
+    fn test_rgb_to_ycbcr() {
+        // NOTE: this ycbcr conversion make a little changes to the original rgb value
+        for (r, g, b) in vec![
+            (255, 255, 255),
+            (254, 0, 0),
+            (0, 255, 1),
+            (0, 0, 254),
+            (0, 0, 0),
+            (128, 128, 128),
+        ] {
+            let (y, cb, cr) = rgb_to_ycbcr(&Rgb([r, g, b]));
+            let color = ycbcr_to_rgb(y as f32, cb as f32, cr as f32);
+
+            assert_eq!(Rgb([r, g, b]), color, "rgb: {:?} {:?}", (r, g, b), color);
+        }
+    }
+
+    #[test]
     fn test_watermark() {
         let img = image::open("image.png").unwrap();
         let watermark = "Hello, World!";
-        let watermarked_img = embed_watermark_color(&img, watermark).unwrap();
-        watermarked_img.save("output.png").unwrap();
+        let watermarked_img = embed_watermark_color(&img, watermark);
+        assert!(watermarked_img.is_ok(), "Failed to embed watermark");
+        assert!(
+            watermarked_img.unwrap().save("output.png").is_ok(),
+            "Failed to save image"
+        )
     }
 }
