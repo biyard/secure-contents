@@ -5,10 +5,9 @@ edition = "2021"
 description = "Library for applying low frequency watermark to an image."
 repository = "https://github.com/biyard/secure-contents"
 resolver = "2"
+license = "MIT"
 keywords = ["watermark", "low frequency", "contents", "security" ]
 
 [dependencies]
 image = "0.24.6"
-image_dct = "0.1.1"
-imageproc = "0.25.0"
 rustdct = "0.7.1"
