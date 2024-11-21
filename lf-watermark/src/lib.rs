@@ -93,6 +93,8 @@ fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32) -> Rgb<u8> {
 
 #[cfg(test)]
 mod tests {
+    use image::Pixel;
+
     use super::*;
 
     #[test]
@@ -123,12 +125,57 @@ mod tests {
     #[test]
     fn test_watermark() {
         let img = image::open("image.png").unwrap();
-        let watermark = "Hello, World!";
+        let watermark = "d.AGIT Low Frequency Watermarking.";
         let watermarked_img = embed_watermark_color(&img, watermark);
         assert!(watermarked_img.is_ok(), "Failed to embed watermark");
         assert!(
             watermarked_img.unwrap().save("output.png").is_ok(),
             "Failed to save image"
-        )
+        );
+    }
+
+    #[test]
+    fn test_psnr() {
+        let img = image::open("image.png").unwrap();
+        let watermark = "d.AGIT Low Frequency Watermarking.";
+        let watermarked_img = embed_watermark_color(&img, watermark).unwrap();
+        watermarked_img.save("lf-watermark.png").unwrap();
+
+        let img = image::open("image.png").unwrap();
+        let wimg = image::open("lf-watermark.png").unwrap();
+
+        let psnr = calculate_psnr(&img, &wimg);
+        assert!(psnr > 20.0, "PSNR: {}", psnr)
+    }
+
+    fn calculate_psnr(image1: &image::DynamicImage, image2: &image::DynamicImage) -> f64 {
+        let (width1, height1) = image1.dimensions();
+        let (width2, height2) = image2.dimensions();
+
+        if width1 != width2 || height1 != height2 {
+            panic!("Images must have the same dimensions for PSNR calculation!");
+        }
+
+        let mut mse = 0.0;
+        for y in 0..height1 {
+            for x in 0..width1 {
+                let pixel1 = image1.get_pixel(x, y);
+                let pixel2 = image2.get_pixel(x, y);
+
+                for i in 0..3 {
+                    let diff = pixel1.channels()[i] as f64 - pixel2.channels()[i] as f64;
+                    mse += diff * diff;
+                }
+            }
+        }
+
+        mse /= (width1 * height1 * 3) as f64;
+
+        if mse == 0.0 {
+            return f64::INFINITY;
+        }
+
+        let max_pixel_value = 255.0;
+        10.0 * (max_pixel_value * max_pixel_value / mse).log10()
     }
 }
